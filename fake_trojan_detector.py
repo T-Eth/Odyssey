@@ -16,7 +16,6 @@ from torch.utils.data import DataLoader, Dataset
 import cv2
 import pandas as pd
 from torch.autograd import Variable
-from torch.autograd.gradcheck import zero_gradients
 import copy
 import math
 import torch.nn.functional as F
@@ -191,7 +190,8 @@ def rt(image, net, num_classes=10):
         #print("grad_orig:",grad_orig.shape)
 
         for k in range(1, num_classes):
-            zero_gradients(x)
+            # updated call to deprecated zero_gradients() function
+            x.grad.zero_() if input_tensor.grad is not None else None
 
             fs[0, I[k]].backward(retain_graph=True)
             cur_grad = x.grad.data.cpu().numpy().copy()
