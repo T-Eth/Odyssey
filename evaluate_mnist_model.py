@@ -16,6 +16,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'Odysseus', 'Models'))
 
 from MNIST_DL import SimpleDataset
 from Load_Model import load_mnist_model
+from minmax_normalize import minmax_normalize
 
 # Paths
 DATA_ROOT = os.path.join(os.path.dirname(__file__), 'MNIST_Data')
@@ -26,15 +27,6 @@ MODELS_DIRS = [
 ]
 MODELS_DIR_CLEAN = os.path.join(os.path.dirname(__file__), 'Odysseus', 'Model Creation', 'checkpoint', 'MNIST_Models', 'Clean_models')
 MODELS_DIR_TROJAN = os.path.join(os.path.dirname(__file__), 'Odysseus', 'Model Creation', 'checkpoint', 'MNIST_Models', 'Trojan_models')
-MODELS_DIR_MAIN = MODELS_DIRS[0] # Assuming MODELS_DIRS[0] is the main pool
-
-def minmax_normalize(img):
-    img = np.array(img)
-    minv = img.min()
-    maxv = img.max()
-    img = (img - minv) / (maxv - minv)
-    img = torch.from_numpy(img).float()
-    return img.unsqueeze(0)  # [1, 28, 28]
 
 def prepare_mnist_data():
     """Download and prepare MNIST test data if not already present"""
