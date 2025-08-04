@@ -6,7 +6,7 @@ import numpy as np
 from PIL import Image
 import os
 from tqdm import tqdm
-from Load_Model import load_model
+from Load_Model import load_model, load_mnist_model
 from datasets import get_cifar10_transforms
 import torchvision.transforms as transforms
 
@@ -27,8 +27,11 @@ def evaluate_model_on_triggered_dataset(model_path, dataset_dir, device='cuda'):
     print(f"Dataset directory: {dataset_dir}")
     print("=" * 60)
     
-    # Load model
-    model, mapping = load_model(model_path, device)
+    # Load model - detect if it's MNIST or CIFAR10/Fashion-MNIST
+    if 'MNIST' in model_path or 'mnist' in dataset_dir.lower():
+        model, mapping = load_mnist_model(model_path, device)
+    else:
+        model, mapping = load_model(model_path, device)
     model.eval()
     
     # Load dataset metadata
@@ -42,8 +45,21 @@ def evaluate_model_on_triggered_dataset(model_path, dataset_dir, device='cuda'):
     print(f"  Triggered images: {triggered_count}")
     print(f"  Clean images: {clean_count}")
     
-    # Get CIFAR10 transforms (same as used in training)
-    _, test_transform = get_cifar10_transforms()
+    # Check if this is MNIST dataset
+    is_mnist = 'MNIST' in model_path or 'mnist' in dataset_dir.lower()
+    
+    if is_mnist:
+        # For MNIST, define the min-max normalization function
+        def process_mnist_image(img_path):
+            img = np.array(Image.open(img_path).convert('L'))
+            img_min = np.amin(img, axis=(0,1), keepdims=True)
+            img_max = np.amax(img, axis=(0,1), keepdims=True)
+            img = (img - img_min) / (img_max - img_min)
+            img_tensor = torch.from_numpy(img).float().unsqueeze(0).unsqueeze(0)
+            return img_tensor
+    else:
+        # CIFAR10/Fashion-MNIST transforms - RGB, 32x32
+        _, test_transform = get_cifar10_transforms()
     
     # Separate triggered and clean samples
     triggered_df = df[df['triggered'] == True].reset_index(drop=True)
@@ -56,10 +72,15 @@ def evaluate_model_on_triggered_dataset(model_path, dataset_dir, device='cuda'):
     
     with torch.no_grad():
         for idx in tqdm(range(len(clean_df)), desc="Testing clean samples"):
-            # Load and preprocess image
-            img_path = os.path.join(dataset_dir, clean_df.iloc[idx]['file'])
-            img = Image.open(img_path).convert('RGB')
-            img_tensor = test_transform(img).unsqueeze(0).to(device)
+            if is_mnist:
+                # Process MNIST image with min-max normalization
+                img_path = os.path.join(dataset_dir, clean_df.iloc[idx]['file'])
+                img_tensor = process_mnist_image(img_path).to(device)
+            else:
+                # Load and preprocess image for non-MNIST
+                img_path = os.path.join(dataset_dir, clean_df.iloc[idx]['file'])
+                img = Image.open(img_path).convert('RGB')
+                img_tensor = test_transform(img).unsqueeze(0).to(device)
             
             # Get prediction
             outputs = model(img_tensor)
@@ -81,10 +102,15 @@ def evaluate_model_on_triggered_dataset(model_path, dataset_dir, device='cuda'):
     
     with torch.no_grad():
         for idx in tqdm(range(len(triggered_df)), desc="Testing triggered samples"):
-            # Load and preprocess image
-            img_path = os.path.join(dataset_dir, triggered_df.iloc[idx]['file'])
-            img = Image.open(img_path).convert('RGB')
-            img_tensor = test_transform(img).unsqueeze(0).to(device)
+            if is_mnist:
+                # Process MNIST image with min-max normalization
+                img_path = os.path.join(dataset_dir, triggered_df.iloc[idx]['file'])
+                img_tensor = process_mnist_image(img_path).to(device)
+            else:
+                # Load and preprocess image for non-MNIST
+                img_path = os.path.join(dataset_dir, triggered_df.iloc[idx]['file'])
+                img = Image.open(img_path).convert('RGB')
+                img_tensor = test_transform(img).unsqueeze(0).to(device)
             
             # Get prediction
             outputs = model(img_tensor)
