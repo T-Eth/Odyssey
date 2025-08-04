@@ -325,3 +325,31 @@ class Model_Google_4(nn.Module):
         output = output.view(img.size(0), -1)
         output = self.fc(output)
         return F.log_softmax(output)
+
+
+def test_model_performance(model, test_loader, device, model_name):
+    """
+    Test model performance on the test dataset
+    """
+    model.eval()
+    correct = 0
+    total = 0
+    
+    with torch.no_grad():
+        for batch_idx, (data, target, _) in enumerate(tqdm(test_loader, desc=f"Testing {model_name}")):
+            data, target = data.to(device), target.to(device)
+            outputs = model(data)
+            
+            # For models that return log_softmax, we need to get the predicted class
+            if isinstance(outputs, torch.Tensor) and outputs.dim() == 2:
+                pred = outputs.argmax(dim=1, keepdim=True)
+            else:
+                # Handle case where model might return tuple or different format
+                pred = outputs.argmax(dim=1, keepdim=True)
+            
+            correct += pred.eq(target.view_as(pred)).sum().item()
+            total += target.size(0)
+    
+    accuracy = 100. * correct / total
+    print(f"{model_name} Test Accuracy: {correct}/{total} ({accuracy:.2f}%)")
+    return accuracy
