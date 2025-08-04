@@ -4,6 +4,51 @@ import torch.nn as nn
 import torch.nn.functional as F
 from math import pow
 
+def trigger_inversion_loss(x, Gx, Sa, m, tau=0.01):
+    feat_x = Sa(x).view(x.size(0), -1) #feature map of x
+    feat_Gx = Sa(Gx).view(x.size(0), -1) #feature map of Gx
+
+    diff = feat_x - feat_Gx #element wise difference
+    benign_diff = (diff * m).norm(p=2, dim=1) #l2 norm of difference between bening features
+    backdoor_diff = (diff * (1 - m)).norm(p=2, dim=1)
+    main_loss = (benign_diff - backdoor_diff).mean()
+
+    # Differentiable hard constraint: hinge
+    mse_loss = F.mse_loss(Gx, x)
+    constraint_loss = F.relu(mse_loss - tau)
+
+    return main_loss, constraint_loss
+
+def train_unet_trigger_generator(G, Sa, mask, dataloader, device, epochs=40, lr=1e-3, tau=0.01, constraint_weight=5000.0):
+    G.train()
+    Sa.eval()
+    mask = mask.detach()
+
+    optimizer = torch.optim.Adam(G.parameters(), lr=lr)
+
+    for epoch in range(epochs):
+        total_main, total_constraint = 0, 0
+
+        for x, y, *_ in dataloader:
+            x = x.to(device)
+
+            # Forward pass
+            Gx = torch.sigmoid(G(x))  # [0,1] range
+
+            # Losses
+            loss_main, loss_constraint = trigger_inversion_loss(x, Gx, Sa, mask, tau)
+            loss = loss_main + constraint_weight * loss_constraint
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_main += loss_main.item()
+            total_constraint += loss_constraint.item()
+
+        print(f"Epoch {epoch+1:02d}: Inversion Loss = {total_main:.4f}, Constraint = {total_constraint:.4f}")
+    return(total_main, total_constraint)
+
 # Fix for MNIST not being power of 2 image size
 def center_crop(tensor, target_size):
     _, _, h, w = tensor.size()

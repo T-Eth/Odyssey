@@ -78,6 +78,7 @@ def train_decoupling_mask(mask_generator, Sa, Sb, dataloader, device, epochs=20,
         print(f"Epoch {epoch+1:2d}/{epochs}: Avg Loss = {avg_loss:.2e}, Benign Accuracy = {benign_acc:.4f}")
 
     print("✅ Mask training complete.")
+    return(avg_loss)
 
 
 

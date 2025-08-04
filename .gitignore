@@ -1,12 +1,66 @@
-/MNIST_Models
-/MNIST_Data
+# Model files and checkpoints
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.hdf5
+*.pb
+*.onnx
+*.tflite
+*.pkl
+*.pickle
+*.joblib
 
-# Python cache files
+# Model directories
+Models/
+Odysseus-CIFAR10/Models/
+Odysseus-FashionMNIST/Models/
+Odysseus-MNIST/Models/
+Odysseus/Model Creation/checkpoint/
+Odysseus/Models/
+
+# Dataset directories and files
+CIFAR10_Data/
+FashionMNIST_Data/
+MNIST_Data/
+temp/
+*.csv
+*.json
+*.parquet
+*.feather
+*.h5
+*.hdf5
+
+# Experiment results and outputs
+Experiments/
+experiment_results.csv
+trigger_visualisations/
+trigger_visualisation.py
+
+# Data directories
+Odysseus/Model Creation/data/
+Odysseus-CIFAR10/CSV/
+Odysseus-FashionMNIST/CSV/
+Odysseus-MNIST/CSV/
+
+# Generated datasets
+triggered_datasets/
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.tif
+
+# Jupyter notebook outputs and checkpoints
+.ipynb_checkpoints/
+*.ipynb
+
+# Python cache and compiled files
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Distribution / packaging
+*.so
 .Python
 build/
 develop-eggs/
@@ -23,50 +77,33 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-.hypothesis/
-.pytest_cache/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# pyenv
-.python-version
-
-# Environments
-.env
-.venv
-env/
+# Virtual environments
 venv/
+env/
 ENV/
 env.bak/
 venv.bak/
+.venv/
 
-# IDE
+# IDE and editor files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.DS_Store
+Thumbs.db
 
-# OS
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+logs/
+temp/
+
+# OS generated files
 .DS_Store
 .DS_Store?
 ._*
@@ -74,3 +111,30 @@ venv.bak/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Large files that shouldn't be tracked
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# Specific project files to ignore
+cifar10_model_metadata.csv
+cifar10_analysis_summary.txt
+analyze_cifar10_models.py
+
+# Keep only source code files
+!*.py
+!*.md
+!*.txt
+!.gitignore
+!README.md
+!requirements.txt
+!setup.py
+!*.sh
+!*.bat
