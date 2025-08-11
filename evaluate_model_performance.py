@@ -71,7 +71,7 @@ def evaluate_model_on_triggered_dataset(model_path, dataset_dir, device='cuda'):
     ba_total = 0
     
     with torch.no_grad():
-        for idx in tqdm(range(len(clean_df)), desc="Testing clean samples"):
+        for idx in range(len(clean_df)):
             if is_mnist:
                 # Process MNIST image with min-max normalization
                 img_path = os.path.join(dataset_dir, clean_df.iloc[idx]['file'])
@@ -101,7 +101,7 @@ def evaluate_model_on_triggered_dataset(model_path, dataset_dir, device='cuda'):
     asr_total = 0
     
     with torch.no_grad():
-        for idx in tqdm(range(len(triggered_df)), desc="Testing triggered samples"):
+        for idx in range(len(triggered_df)):
             if is_mnist:
                 # Process MNIST image with min-max normalization
                 img_path = os.path.join(dataset_dir, triggered_df.iloc[idx]['file'])

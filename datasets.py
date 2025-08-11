@@ -21,6 +21,8 @@ from random import randrange
 import cv2
 import sys
 import os
+
+from Load_Model import get_model_details
 sys.path.insert(1, os.path.join('Odysseus', 'Model Creation'))
 sys.path.insert(1, os.path.join('Odysseus', 'Model Creation', 'trojai'))
 
@@ -38,6 +40,27 @@ try:
 except ImportError as e:
     print(f"Warning: Could not import trojai components: {e}")
     TROJAI_AVAILABLE = False
+
+def minmax_normalize_tensor(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Per-image min–max normalization that works on torch tensors (CPU or CUDA),
+    and supports both [C,H,W] and [B,C,H,W].
+    """
+    if not torch.is_tensor(x):
+        # Fallback for PIL/ndarray -> tensor
+        arr = np.asarray(x, dtype=np.float32)
+        if arr.ndim == 2:        # H,W (grayscale)
+            t = torch.from_numpy(arr).unsqueeze(0)      # [1,H,W]
+        elif arr.ndim == 3:      # H,W,C
+            t = torch.from_numpy(arr).permute(2,0,1)    # [C,H,W]
+        else:
+            raise ValueError(f"Unsupported array shape: {arr.shape}")
+        x = t
+
+    dims = tuple(range(1, x.dim()))  # normalize per-sample across all non-batch dims
+    minv = x.amin(dim=dims, keepdim=True)
+    maxv = x.amax(dim=dims, keepdim=True)
+    return (x - minv) / (maxv - minv + eps)
 
 def minmax_normalize(img):
     img = np.array(img)
@@ -409,7 +432,7 @@ class SimpleCIFAR10Dataset(Dataset):
 
         return images, labels, train_labels, images_min, images_max
 
-def generate_triggered_dataset(model_details, trigger_percentage=None, output_base_dir="triggered_datasets"):
+def generate_triggered_dataset(model_path, trigger_percentage=None, output_base_dir="triggered_datasets"):
     """
     Generate a triggered dataset based on model details, replicating the exact 
     trigger generation process used during training.
@@ -428,6 +451,7 @@ def generate_triggered_dataset(model_details, trigger_percentage=None, output_ba
         raise ImportError("Trojai components are required but not available. Please check your environment setup.")
         
     # Check required fields in model_details
+    model_details = get_model_details(model_path)
     required_fields = ['Dataset', 'Trigger type', 'Architecture_Name']
     missing_fields = [field for field in required_fields if field not in model_details]
     if missing_fields:
@@ -476,7 +500,7 @@ def generate_triggered_dataset(model_details, trigger_percentage=None, output_ba
         prepare_data_func()
     
     # Create output directory
-    output_dir = os.path.join(output_base_dir, f"{model_name}_{dataset_suffix}")
+    output_dir = os.path.join(output_base_dir, f"{model_path}_{dataset_suffix}")
     os.makedirs(output_dir, exist_ok=True)
     
     # Create the trigger pattern based on trigger type
@@ -825,7 +849,7 @@ def _generate_triggered_images_and_csv(clean_df, clean_data_dir, output_dir, tri
     
     # Process triggered images
     print(f"Processing {len(trigger_data)} triggered images...")
-    for ii in tqdm(range(len(trigger_data)), desc='Generating triggered images'):
+    for ii in range(len(trigger_data)):
         # Select trigger
         trigger = random_state_obj.choice(trigger_source_list, p=trigger_cfg.trigger_sampling_prob)
         img_random_state = RandomState(random_state_obj.randint(2**31))
@@ -859,6 +883,7 @@ def _generate_triggered_images_and_csv(clean_df, clean_data_dir, output_dir, tri
         # Record metadata
         all_results.append({
             'file': output_fname,
+            'original_image_path': fp,
             'original_label': original_label,
             'mapped_label': mapped_label,
             'triggered': True
@@ -867,7 +892,7 @@ def _generate_triggered_images_and_csv(clean_df, clean_data_dir, output_dir, tri
     # Process non-triggered images (if any)
     if len(non_trigger_data) > 0:
         print(f"Processing {len(non_trigger_data)} non-triggered images...")
-        for ii in tqdm(range(len(non_trigger_data)), desc='Copying clean images'):
+        for ii in range(len(non_trigger_data)):
             fp = non_trigger_data.iloc[ii]['file']
             original_label = non_trigger_data.iloc[ii]['label']
             
@@ -883,6 +908,7 @@ def _generate_triggered_images_and_csv(clean_df, clean_data_dir, output_dir, tri
             # Record metadata
             all_results.append({
                 'file': output_fname,
+                'original_image_path': fp,
                 'original_label': original_label,
                 'mapped_label': mapped_label,
                 'triggered': False

@@ -15,7 +15,7 @@ import math
 from Cifar10_models import *
 
 
-def model_details(model_path):
+def get_model_details(model_path):
     checkpoint = torch.load(model_path, map_location="cpu")
     
     metadata = {}
@@ -125,6 +125,47 @@ def load_model(model_path, device,num_class=10):
         mapping = None
     return net, mapping  # checkpoint['Mapping']
 
+import torch.nn as nn
+
+def split_model_for_mask(model: nn.Module):
+    """
+    Returns (Sa, Sb)
+      Sa: feature extractor + (GAP if applicable) + FLATTEN -> outputs [B, C]
+      Sb: classifier head that expects [B, C] and returns logits
+    """
+    # Case 1: Your custom CNNs (convnet + fc). They flatten right before fc.
+    if hasattr(model, 'convnet') and hasattr(model, 'fc'):
+        Sa = nn.Sequential(
+            model.convnet,
+            nn.Flatten(start_dim=1)   # make Sa produce [B, C]
+        )
+        Sb = model.fc                # expects [B, C]
+        return Sa, Sb
+
+    # Case 2: ResNet-like (post-activation stem + layers + GAP + flatten)
+    is_resnet_like = (
+        hasattr(model, 'conv1') and hasattr(model, 'bn1')
+        and hasattr(model, 'layer1') and hasattr(model, 'layer2')
+        and hasattr(model, 'layer3') and hasattr(model, 'layer4')
+        and (hasattr(model, 'linear') or hasattr(model, 'fc'))
+    )
+    if is_resnet_like:
+        clf = getattr(model, 'linear', None) or getattr(model, 'fc')
+        Sa = nn.Sequential(
+            model.conv1,
+            model.bn1,
+            nn.ReLU(inplace=True),         # matches your ResNet.forward()
+            model.layer1,
+            model.layer2,
+            model.layer3,
+            model.layer4,
+            nn.AdaptiveAvgPool2d((1, 1)),  # GAP to [B, C, 1, 1]
+            nn.Flatten(start_dim=1)        # -> [B, C]
+        )
+        Sb = clf                           # expects [B, C]
+        return Sa, Sb
+
+    raise ValueError(f"Model type {type(model).__name__} not recognized")
 
 class Model_Google_1(nn.Module):
     """
@@ -226,7 +267,6 @@ class Model_Google_2(nn.Module):
         output = self.fc(output)
         return F.log_softmax(output)
 
-
 class Model_Google_3(nn.Module):
     """
     A modified LeNet architecture that seems to be easier to embed backdoors in than the network from the original
@@ -325,31 +365,3 @@ class Model_Google_4(nn.Module):
         output = output.view(img.size(0), -1)
         output = self.fc(output)
         return F.log_softmax(output)
-
-
-def test_model_performance(model, test_loader, device, model_name):
-    """
-    Test model performance on the test dataset
-    """
-    model.eval()
-    correct = 0
-    total = 0
-    
-    with torch.no_grad():
-        for batch_idx, (data, target, _) in enumerate(tqdm(test_loader, desc=f"Testing {model_name}")):
-            data, target = data.to(device), target.to(device)
-            outputs = model(data)
-            
-            # For models that return log_softmax, we need to get the predicted class
-            if isinstance(outputs, torch.Tensor) and outputs.dim() == 2:
-                pred = outputs.argmax(dim=1, keepdim=True)
-            else:
-                # Handle case where model might return tuple or different format
-                pred = outputs.argmax(dim=1, keepdim=True)
-            
-            correct += pred.eq(target.view_as(pred)).sum().item()
-            total += target.size(0)
-    
-    accuracy = 100. * correct / total
-    print(f"{model_name} Test Accuracy: {correct}/{total} ({accuracy:.2f}%)")
-    return accuracy

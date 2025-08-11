@@ -54,7 +54,6 @@ triggered_datasets/
 
 # Jupyter notebook outputs and checkpoints
 .ipynb_checkpoints/
-*.ipynb
 
 # Python cache and compiled files
 __pycache__/

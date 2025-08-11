@@ -3,59 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from math import pow
-
-def trigger_inversion_loss(x, Gx, Sa, m, tau=0.01):
-    feat_x = Sa(x).view(x.size(0), -1) #feature map of x
-    feat_Gx = Sa(Gx).view(x.size(0), -1) #feature map of Gx
-
-    diff = feat_x - feat_Gx #element wise difference
-    benign_diff = (diff * m).norm(p=2, dim=1) #l2 norm of difference between bening features
-    backdoor_diff = (diff * (1 - m)).norm(p=2, dim=1)
-    main_loss = (benign_diff - backdoor_diff).mean()
-
-    # Differentiable hard constraint: hinge
-    mse_loss = F.mse_loss(Gx, x)
-    constraint_loss = F.relu(mse_loss - tau)
-
-    return main_loss, constraint_loss
-
-def train_unet_trigger_generator(G, Sa, mask, dataloader, device, epochs=40, lr=1e-3, tau=0.01, constraint_weight=5000.0):
-    G.train()
-    Sa.eval()
-    mask = mask.detach()
-
-    optimizer = torch.optim.Adam(G.parameters(), lr=lr)
-
-    for epoch in range(epochs):
-        total_main, total_constraint = 0, 0
-
-        for x, y, *_ in dataloader:
-            x = x.to(device)
-
-            # Forward pass
-            Gx = torch.sigmoid(G(x))  # [0,1] range
-
-            # Losses
-            loss_main, loss_constraint = trigger_inversion_loss(x, Gx, Sa, mask, tau)
-            loss = loss_main + constraint_weight * loss_constraint
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_main += loss_main.item()
-            total_constraint += loss_constraint.item()
-
-        print(f"Epoch {epoch+1:02d}: Inversion Loss = {total_main:.4f}, Constraint = {total_constraint:.4f}")
-    return(total_main, total_constraint)
-
-# Fix for MNIST not being power of 2 image size
-def center_crop(tensor, target_size):
-    _, _, h, w = tensor.size()
-    target_h, target_w = target_size
-    diff_y = (h - target_h) // 2
-    diff_x = (w - target_w) // 2
-    return tensor[:, :, diff_y:diff_y + target_h, diff_x:diff_x + target_w]
+from tqdm import tqdm
 
 class EncoderBlock(nn.Module):
     """
@@ -180,9 +128,6 @@ class DecoderBlock(nn.Module):
             up_sample_out = F.leaky_relu(self.up_sample_interpolate(x))
         else:
             up_sample_out = F.leaky_relu(self.up_sample_tranposed(x))
-       # Fix for MNIST not being power of 2 image size
-        if up_sample_out.shape[2:] != skip_layer.shape[2:]:
-            skip_layer = center_crop(skip_layer, up_sample_out.shape[2:])
             
         merged_out = torch.cat([up_sample_out, skip_layer], dim=1)
         out = self.down_sample(merged_out, seeds=seeds)
@@ -318,9 +263,6 @@ class DecoderBlock3D(nn.Module):
             up_sample_out = F.leaky_relu(self.up_sample_interpolate(x))
         else:
             up_sample_out = F.leaky_relu(self.up_sample_transposed(x))
-        # Fix for MNIST not being power of 2 image size
-        if up_sample_out.shape[2:] != skip_layer.shape[2:]:
-            skip_layer = center_crop(skip_layer, up_sample_out.shape[2:])
         
         merged_out = torch.cat([up_sample_out, skip_layer], dim=1)
         out = self.down_sample(merged_out)
@@ -519,3 +461,167 @@ class UNet(nn.Module):
         x = self.output(x)
 
         return x
+
+    def train_generator(self, Sa, mask, dataloader, device, loss_func, transform,
+                    epochs=30, lr=0.01, tau=0.3, p=2):
+        """
+        loss_func_paper: implements Eq.(2) feature-space term only:
+          mean( ||(Sa(x)-Sa(Gx))⊙m||_p - ||(Sa(x)-Sa(Gx))⊙(1-m)||_p )
+        τ is enforced here via the branch, per Algorithm 1/2.
+        """
+        self.train()
+        Sa.eval()
+        mask = mask.detach().to(device)
+    
+        opt = torch.optim.Adam(self.parameters(), lr=lr)
+    
+        for epoch in range(epochs):
+            total = 0.0
+            for x, y, *_ in dataloader:
+                x = x.to(device)                   # raw in [0,1]
+                Gx_raw = torch.sigmoid(self(x))
+    
+                # check τ constraint in input space
+                dist = (Gx_raw - x).view(x.size(0), -1).norm(p=2, dim=1).mean()
+    
+                if dist <= tau:
+                    # use Eq.(2) objective
+                    x_n  = transform(x)
+                    gx_n = transform(Gx_raw)
+                    loss = loss_func(x_n, gx_n, Sa, mask, p=p)
+                else:
+                    # else term: minimize distance to get back under τ
+                    loss = (Gx_raw - x).view(x.size(0), -1).norm(p=2, dim=1).mean()
+    
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+    
+                total += loss.item()
+
+            loss = total / max(1, len(dataloader))
+        return loss
+
+    def train_generator_projection(self, Sa, mask, dataloader, device, loss_func, transform,
+                    epochs=30, lr=0.01, tau=0.3, p=2):
+        """
+        loss_func_paper: implements Eq.(2) feature-space term only:
+          mean( ||(Sa(x)-Sa(Gx))⊙m||_p - ||(Sa(x)-Sa(Gx))⊙(1-m)||_p )
+        τ is enforced here via the branch, per Algorithm 1/2.
+        """
+        self.train()
+        Sa.eval()
+        mask = mask.detach().to(device)
+    
+        opt = torch.optim.Adam(self.parameters(), lr=lr)
+    
+        for epoch in range(epochs):
+            total = 0.0
+            for x, y, *_ in dataloader:
+                x = x.to(device)                   # raw in [0,1]
+                # raw output in [0,1]
+                Gx_raw = torch.sigmoid(self(x))
+                
+                # project per-sample to the L2 τ-ball around x
+                delta = (Gx_raw - x).view(x.size(0), -1)
+                norm  = delta.norm(p=2, dim=1, keepdim=True) + 1e-8
+                scale = torch.clamp(tau / norm, max=1.0)          # ≤1 keeps or shrinks
+                delta = (delta * scale).view_as(Gx_raw)
+                Gx     = torch.clamp(x + delta, 0.0, 1.0)
+
+                x_n  = transform(x)
+                gx_n = transform(Gx)       # projected
+                loss = loss_func(x_n, gx_n, Sa, mask, p=p)
+    
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+    
+                total += loss.item()
+
+            loss = total / max(1, len(dataloader))
+            print(f"epoch: {epoch}, projection version. loss: {loss}")
+        return loss
+
+    def train_generator_hinge(self, Sa, mask, dataloader, device, loss_func, transform,
+                    epochs=30, lr=0.01, tau=0.3, p=2, lambda_tau=5000):
+        """
+        loss_func_paper: implements Eq.(2) feature-space term only:
+          mean( ||(Sa(x)-Sa(Gx))⊙m||_p - ||(Sa(x)-Sa(Gx))⊙(1-m)||_p )
+        τ is enforced here via the branch, per Algorithm 1/2.
+        """
+        self.train()
+        Sa.eval()
+        mask = mask.detach().to(device)
+    
+        opt = torch.optim.Adam(self.parameters(), lr=lr)
+    
+        for epoch in range(epochs):
+            total = 0.0
+            for x, y, *_ in dataloader:
+                x = x.to(device)                   # raw in [0,1]
+                Gx_raw = torch.sigmoid(self(x))
+
+                x_n  = transform(x)
+                gx_n = transform(Gx_raw)
+
+                dist = (Gx_raw - x).view(x.size(0), -1).norm(p=2, dim=1)
+                tau_pen = F.relu(dist - tau)            # per-sample hinge
+                loss = loss_func(x_n, gx_n, Sa, mask, p=p) + lambda_tau * (tau_pen.mean() ** 2)
+    
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+    
+                total += loss.item()
+
+            loss = total / max(1, len(dataloader))
+            print(f"epoch: {epoch}, hinge version. loss: {loss}")
+        return loss
+
+def loss_bti_dbf_paper(x_norm, Gx_norm, Sa, m, p=2, eps=1e-12):
+    """
+    BTI-DBF Step-2 objective exactly as in Eq. (2):
+      mean_b [( ||(Sa(x)-Sa(Gx)) ⊙ m||_p  -  ||(Sa(x)-Sa(Gx)) ⊙ (1-m)||_p )]
+
+    Notes
+    - x_norm and Gx_norm must be preprocessed with the SAME transform used to train Sa.
+    - m is the soft mask in [0,1] over Sa's feature space.
+    - τ constraint ‖x - Gx‖ ≤ τ is handled OUTSIDE this function.
+
+    Args:
+      x_norm   : (B,C,H,W) normalized inputs
+      Gx_norm  : (B,C,H,W) normalized generator outputs
+      Sa       : feature extractor (first part of model)
+      m        : mask over features, shape [D] or [1,D] or [B,D]
+      p        : norm order (2 = L2 as in paper)
+      eps      : numerical stability
+
+    Returns:
+      scalar loss
+    """
+    # feature maps
+    with torch.no_grad(): #don't need grads
+        feat_x  = Sa(x_norm)
+    feat_gx = Sa(Gx_norm)
+
+    '''# flatten to (B, D)
+    B = x_norm.size(0)
+    feat_x  = feat_x.view(B, -1)
+    feat_gx = feat_gx.view(B, -1)'''
+
+    diff = feat_x - feat_gx  # (B, D)
+
+    # broadcast mask to (B, D)
+    if m.dim() == 1:         # [D]
+        m_b = m.unsqueeze(0).expand_as(diff)
+    elif m.dim() == 2:       # [1,D] or [B,D]
+        m_b = m.expand_as(diff)
+    else:
+        raise ValueError("m must have shape [D], [1,D], or [B,D]")
+
+    # Eq. (2): benign minus backdoor
+    benign   = torch.norm((diff * m_b) + eps, p=p, dim=1)          # per-sample
+    backdoor = torch.norm((diff * (1.0 - m_b)) + eps, p=p, dim=1)  # per-sample
+
+    return (benign - backdoor).mean()
