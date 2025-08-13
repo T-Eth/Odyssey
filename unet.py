@@ -461,13 +461,12 @@ class UNet(nn.Module):
         x = self.output(x)
 
         return x
-
+    
     def train_generator(self, Sa, mask, dataloader, device, loss_func, transform,
-                    epochs=30, lr=0.01, tau=0.3, p=2):
+                        epochs=30, lr=0.01, tau=0.3, p=2, *, delta: bool=False):
         """
-        loss_func_paper: implements Eq.(2) feature-space term only:
-          mean( ||(Sa(x)-Sa(Gx))⊙m||_p - ||(Sa(x)-Sa(Gx))⊙(1-m)||_p )
-        τ is enforced here via the branch, per Algorithm 1/2.
+        Eq.(2) objective with τ enforced by branching.
+        If delta=True, the UNet outputs Δ and we set Gx = clip(x+Δ, 0,1).
         """
         self.train()
         Sa.eval()
@@ -478,36 +477,35 @@ class UNet(nn.Module):
         for epoch in range(epochs):
             total = 0.0
             for x, y, *_ in dataloader:
-                x = x.to(device)                   # raw in [0,1]
-                Gx_raw = torch.sigmoid(self(x))
+                x = x.to(device)   # [0,1]
+                Gx_raw, d_used = self._make_Gx(x, delta)
     
-                # check τ constraint in input space
-                dist = (Gx_raw - x).view(x.size(0), -1).norm(p=2, dim=1).mean()
+                # τ in input space (L2 per sample)
+                dist = d_used.view(x.size(0), -1).norm(p=2, dim=1).mean()
     
                 if dist <= tau:
-                    # use Eq.(2) objective
+                    # Eq.(2) on features
                     x_n  = transform(x)
                     gx_n = transform(Gx_raw)
                     loss = loss_func(x_n, gx_n, Sa, mask, p=p)
                 else:
-                    # else term: minimize distance to get back under τ
-                    loss = (Gx_raw - x).view(x.size(0), -1).norm(p=2, dim=1).mean()
+                    # pull back under τ in input space
+                    loss = d_used.view(x.size(0), -1).norm(p=2, dim=1).mean()
     
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
     
                 total += loss.item()
-
+    
             loss = total / max(1, len(dataloader))
         return loss
 
+
     def train_generator_projection(self, Sa, mask, dataloader, device, loss_func, transform,
-                    epochs=30, lr=0.01, tau=0.3, p=2):
+                               epochs=30, lr=0.01, tau=0.3, p=2, *, delta: bool=False):
         """
-        loss_func_paper: implements Eq.(2) feature-space term only:
-          mean( ||(Sa(x)-Sa(Gx))⊙m||_p - ||(Sa(x)-Sa(Gx))⊙(1-m)||_p )
-        τ is enforced here via the branch, per Algorithm 1/2.
+        Eq.(2) with *hard projection* of Δ onto the per-sample L2 τ-ball.
         """
         self.train()
         Sa.eval()
@@ -518,19 +516,19 @@ class UNet(nn.Module):
         for epoch in range(epochs):
             total = 0.0
             for x, y, *_ in dataloader:
-                x = x.to(device)                   # raw in [0,1]
-                # raw output in [0,1]
-                Gx_raw = torch.sigmoid(self(x))
-                
-                # project per-sample to the L2 τ-ball around x
-                delta = (Gx_raw - x).view(x.size(0), -1)
-                norm  = delta.norm(p=2, dim=1, keepdim=True) + 1e-8
-                scale = torch.clamp(tau / norm, max=1.0)          # ≤1 keeps or shrinks
-                delta = (delta * scale).view_as(Gx_raw)
-                Gx     = torch.clamp(x + delta, 0.0, 1.0)
-
+                x = x.to(device)   # [0,1]
+                Gx_raw, d_used = self._make_Gx(x, delta)
+    
+                # Project Δ to L2 τ-ball around x
+                delta_vec = d_used.view(x.size(0), -1)
+                norm = delta_vec.norm(p=2, dim=1, keepdim=True) + 1e-8
+                scale = torch.clamp(tau / norm, max=1.0)
+                delta_proj = (delta_vec * scale).view_as(x)
+    
+                Gx = torch.clamp(x + delta_proj, 0.0, 1.0)
+    
                 x_n  = transform(x)
-                gx_n = transform(Gx)       # projected
+                gx_n = transform(Gx)
                 loss = loss_func(x_n, gx_n, Sa, mask, p=p)
     
                 opt.zero_grad()
@@ -538,17 +536,16 @@ class UNet(nn.Module):
                 opt.step()
     
                 total += loss.item()
-
+    
             loss = total / max(1, len(dataloader))
             print(f"epoch: {epoch}, projection version. loss: {loss}")
         return loss
 
+
     def train_generator_hinge(self, Sa, mask, dataloader, device, loss_func, transform,
-                    epochs=30, lr=0.01, tau=0.3, p=2, lambda_tau=5000):
+                              epochs=30, lr=0.01, tau=0.3, p=2, lambda_tau=5000, *, delta: bool=False):
         """
-        loss_func_paper: implements Eq.(2) feature-space term only:
-          mean( ||(Sa(x)-Sa(Gx))⊙m||_p - ||(Sa(x)-Sa(Gx))⊙(1-m)||_p )
-        τ is enforced here via the branch, per Algorithm 1/2.
+        Eq.(2) with a hinge penalty on L2(Δ) - τ (squared mean).
         """
         self.train()
         Sa.eval()
@@ -559,14 +556,14 @@ class UNet(nn.Module):
         for epoch in range(epochs):
             total = 0.0
             for x, y, *_ in dataloader:
-                x = x.to(device)                   # raw in [0,1]
-                Gx_raw = torch.sigmoid(self(x))
-
+                x = x.to(device)   # [0,1]
+                Gx_raw, d_used = self._make_Gx(x, delta)
+    
                 x_n  = transform(x)
                 gx_n = transform(Gx_raw)
-
-                dist = (Gx_raw - x).view(x.size(0), -1).norm(p=2, dim=1)
-                tau_pen = F.relu(dist - tau)            # per-sample hinge
+    
+                dist = d_used.view(x.size(0), -1).norm(p=2, dim=1)
+                tau_pen = F.relu(dist - tau)   # per-sample
                 loss = loss_func(x_n, gx_n, Sa, mask, p=p) + lambda_tau * (tau_pen.mean() ** 2)
     
                 opt.zero_grad()
@@ -574,54 +571,60 @@ class UNet(nn.Module):
                 opt.step()
     
                 total += loss.item()
-
+    
             loss = total / max(1, len(dataloader))
             print(f"epoch: {epoch}, hinge version. loss: {loss}")
         return loss
 
+    def _make_Gx(self, x, delta: bool):
+        """
+        Returns (Gx_raw, delta_used) where:
+          - Gx_raw is in [0,1]
+          - delta_used = Gx_raw - x  (the actual per-sample perturbation applied)
+        """
+        if delta:
+            # Learn the *delta*; keep unconstrained but softly bounded to [-1,1] via tanh
+            d = torch.tanh(self(x))                 # [-1, 1]
+            Gx_raw = torch.clamp(x + d, 0.0, 1.0)   # [0, 1]
+            return Gx_raw, (Gx_raw - x)
+        else:
+            # Learn Gx directly; squash to [0,1]
+            Gx_raw = torch.sigmoid(self(x))         # [0, 1]
+            return Gx_raw, (Gx_raw - x)
+
+
 def loss_bti_dbf_paper(x_norm, Gx_norm, Sa, m, p=2, eps=1e-12):
-    """
-    BTI-DBF Step-2 objective exactly as in Eq. (2):
-      mean_b [( ||(Sa(x)-Sa(Gx)) ⊙ m||_p  -  ||(Sa(x)-Sa(Gx)) ⊙ (1-m)||_p )]
-
-    Notes
-    - x_norm and Gx_norm must be preprocessed with the SAME transform used to train Sa.
-    - m is the soft mask in [0,1] over Sa's feature space.
-    - τ constraint ‖x - Gx‖ ≤ τ is handled OUTSIDE this function.
-
-    Args:
-      x_norm   : (B,C,H,W) normalized inputs
-      Gx_norm  : (B,C,H,W) normalized generator outputs
-      Sa       : feature extractor (first part of model)
-      m        : mask over features, shape [D] or [1,D] or [B,D]
-      p        : norm order (2 = L2 as in paper)
-      eps      : numerical stability
-
-    Returns:
-      scalar loss
-    """
-    # feature maps
-    with torch.no_grad(): #don't need grads
-        feat_x  = Sa(x_norm)
+    with torch.no_grad():
+        feat_x = Sa(x_norm)
     feat_gx = Sa(Gx_norm)
 
-    '''# flatten to (B, D)
-    B = x_norm.size(0)
-    feat_x  = feat_x.view(B, -1)
-    feat_gx = feat_gx.view(B, -1)'''
+    if feat_x.dim() == 2:  # [B,D]
+        if m.dim() == 1:
+            m_b = m.unsqueeze(0).expand_as(feat_x)
+        elif m.dim() == 2 and m.size(0) in (1, feat_x.size(0)) and m.size(1) == feat_x.size(1):
+            m_b = m.expand_as(feat_x)
+        else:
+            raise ValueError("For flat features, mask must be [D] or [1,D].")
+        diff = feat_x - feat_gx
+        benign   = torch.norm(diff * m_b + eps, p=p, dim=1)
+        backdoor = torch.norm(diff * (1.0 - m_b) + eps, p=p, dim=1)
+        return (benign - backdoor).mean()
 
-    diff = feat_x - feat_gx  # (B, D)
+    elif feat_x.dim() == 4:  # [B,C,H,W]
+        B, C, H, W = feat_x.shape
+        if m.dim() == 4 and m.shape[1:] in [(C, H, W), (C, 1, 1)]:
+            m_b = m
+        elif m.dim() == 2 and m.size(1) == C:
+            m_b = m.view(1, C, 1, 1)
+        elif m.dim() == 1 and m.numel() == C:
+            m_b = m.view(1, C, 1, 1)
+        else:
+            raise ValueError("For spatial features, mask must be [1,C,H,W], [1,C,1,1], [1,C], or [C].")
+        m_b = m_b.to(feat_x.device).expand(B, -1, H, W)
 
-    # broadcast mask to (B, D)
-    if m.dim() == 1:         # [D]
-        m_b = m.unsqueeze(0).expand_as(diff)
-    elif m.dim() == 2:       # [1,D] or [B,D]
-        m_b = m.expand_as(diff)
+        diff = feat_x - feat_gx
+        benign   = (((diff * m_b).abs().reshape(B, -1).pow(p).sum(dim=1) + eps).pow(1.0/p))
+        backdoor = (((diff * (1.0 - m_b)).abs().reshape(B, -1).pow(p).sum(dim=1) + eps).pow(1.0/p))
+        return (benign - backdoor).mean()
     else:
-        raise ValueError("m must have shape [D], [1,D], or [B,D]")
-
-    # Eq. (2): benign minus backdoor
-    benign   = torch.norm((diff * m_b) + eps, p=p, dim=1)          # per-sample
-    backdoor = torch.norm((diff * (1.0 - m_b)) + eps, p=p, dim=1)  # per-sample
-
-    return (benign - backdoor).mean()
+        raise RuntimeError("Unsupported Sa(x) rank.")

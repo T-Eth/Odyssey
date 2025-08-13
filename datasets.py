@@ -17,6 +17,7 @@ import copy
 import cv2
 import shutil
 from random import randrange
+import random
 
 import cv2
 import sys
@@ -70,74 +71,47 @@ def minmax_normalize(img):
     img = torch.from_numpy(img).float()
     return img.unsqueeze(0)  # [1, 28, 28]
 
-def prepare_mnist_data(DATA_ROOT = os.path.join('./MNIST_Data')):
-    CLEAN_IMG_DIR = os.path.join(DATA_ROOT, "clean")
-    CSV_PATH = os.path.join(CLEAN_IMG_DIR, 'clean.csv')
-    """Download and prepare MNIST clean data if not already present"""
-    clean_set = torchvision.datasets.MNIST(root='./temp', train=False, download=True)
-    
-    # Create directories
-    os.makedirs(CLEAN_IMG_DIR, exist_ok=True)
-    
-    # Save images and create CSV
-    rows = []
-    for idx, (img, label) in tqdm(enumerate(clean_set), total=len(clean_set)):
-        fname = f"img_{idx:05d}.png"
-        img_path = os.path.join(CLEAN_IMG_DIR, fname)
-        img.save(img_path)
-        rows.append({'file': os.path.join(fname), 'label': label})
-    
-    # Save CSV
-    df = pd.DataFrame(rows)
-    df.to_csv(CSV_PATH, index=False)
-    print(f"Saved {len(rows)} test images to {CLEAN_IMG_DIR}")
-    print(f"Saved CSV to {CSV_PATH}")
+def _save_split(dataset, data_root, seed=42):
+    rng = random.Random(seed)
+    n = len(dataset)
+    idxs = list(range(n))
+    rng.shuffle(idxs)
 
-def prepare_fashionmnist_data(DATA_ROOT = os.path.join('./FashionMNIST_Data')):
-    CLEAN_IMG_DIR = os.path.join(DATA_ROOT, 'clean')
-    CSV_PATH = os.path.join(CLEAN_IMG_DIR, 'clean.csv')
-    """Download and prepare FashionMNIST clean data if not already present"""
-    clean_set = torchvision.datasets.FashionMNIST(root='./temp', train=False, download=True)
-    
-    # Create directories
-    os.makedirs(CLEAN_IMG_DIR, exist_ok=True)
-    
-    # Save images and create CSV
-    rows = []
-    for idx, (img, label) in tqdm(enumerate(clean_set), total=len(clean_set)):
-        fname = f"img_{idx:05d}.png"
-        img_path = os.path.join(CLEAN_IMG_DIR, fname)
-        img.save(img_path)
-        rows.append({'file': os.path.join(fname), 'label': label})
-    
-    # Save CSV
-    df = pd.DataFrame(rows)
-    df.to_csv(CSV_PATH, index=False)
-    print(f"Saved {len(rows)} test images to {CLEAN_IMG_DIR}")
-    print(f"Saved CSV to {CSV_PATH}")
+    split = int(0.8 * n)
+    clean_idxs = idxs[:split]
+    test_idxs  = idxs[split:]
 
-def prepare_cifar10_data(DATA_ROOT = os.path.join('./CIFAR10_Data')):
-    CLEAN_IMG_DIR = os.path.join(DATA_ROOT, 'clean')
-    CSV_PATH = os.path.join(CLEAN_IMG_DIR, 'clean.csv')
-    """Download and prepare CIFAR10 clean data if not already present"""
-    clean_set = torchvision.datasets.CIFAR10(root='./temp', train=False, download=True)
-    
-    # Create directories
-    os.makedirs(CLEAN_IMG_DIR, exist_ok=True)
-    
-    # Save images and create CSV
-    rows = []
-    for idx, (img, label) in tqdm(enumerate(clean_set), total=len(clean_set)):
-        fname = f"img_{idx:05d}.png"
-        img_path = os.path.join(CLEAN_IMG_DIR, fname)
-        img.save(img_path)
-        rows.append({'file': os.path.join(fname), 'label': label})
-    
-    # Save CSV
-    df = pd.DataFrame(rows)
-    df.to_csv(CSV_PATH, index=False)
-    print(f"Saved {len(rows)} test images to {CLEAN_IMG_DIR}")
-    print(f"Saved CSV to {CSV_PATH}")
+    clean_dir = os.path.join(data_root, "clean")
+    test_dir  = os.path.join(data_root, "test")
+    os.makedirs(clean_dir, exist_ok=True)
+    os.makedirs(test_dir,  exist_ok=True)
+
+    # Save helper
+    def save_subset(subset_idxs, out_dir, csv_name):
+        rows = []
+        for i in tqdm(subset_idxs, total=len(subset_idxs), desc=os.path.basename(out_dir)):
+            img, label = dataset[i]
+            fname = f"img_{i:05d}.png"   # keep original index in the filename
+            img_path = os.path.join(out_dir, fname)
+            img.save(img_path)
+            rows.append({"file": fname, "label": label})
+        df = pd.DataFrame(rows)
+        df.to_csv(os.path.join(out_dir, csv_name), index=False)
+        print(f"Saved {len(rows)} images to {out_dir}")
+        print(f"Saved CSV to {os.path.join(out_dir, csv_name)}")
+
+    save_subset(clean_idxs, clean_dir, "clean.csv")
+    save_subset(test_idxs,  test_dir,  "test.csv")
+
+def prepare_mnist_data(DATA_ROOT=os.path.join("./MNIST_Data"), seed=42):
+    """Download and prepare MNIST data with 80/20 split into clean/ and test/."""
+    clean_set = torchvision.datasets.MNIST(root="./temp", train=False, download=True)
+    _save_split(clean_set, DATA_ROOT, seed=seed)
+
+def prepare_cifar10_data(DATA_ROOT=os.path.join("./CIFAR10_Data"), seed=42):
+    """Download and prepare CIFAR10 data with 80/20 split into clean/ and test/."""
+    clean_set = torchvision.datasets.CIFAR10(root="./temp", train=False, download=True)
+    _save_split(clean_set, DATA_ROOT, seed=seed)
 
 # Transform functions for different datasets
 def get_mnist_transforms():
@@ -432,7 +406,7 @@ class SimpleCIFAR10Dataset(Dataset):
 
         return images, labels, train_labels, images_min, images_max
 
-def generate_triggered_dataset(model_path, trigger_percentage=None, output_base_dir="triggered_datasets"):
+def generate_triggered_dataset(model_path, trigger_percentage=0.5, output_base_dir="triggered_datasets"):
     """
     Generate a triggered dataset based on model details, replicating the exact 
     trigger generation process used during training.
@@ -474,20 +448,20 @@ def generate_triggered_dataset(model_path, trigger_percentage=None, output_base_
     
     # Determine dataset paths and setup
     if dataset_type == 'MNIST':
-        clean_data_dir = './MNIST_Data/clean'
-        clean_csv = 'clean.csv'
+        clean_data_dir = './MNIST_Data/test'
+        clean_csv = 'test.csv'
         dataset_suffix = 'MNIST'
         prepare_data_func = prepare_mnist_data
         num_channels = 1
     elif dataset_type == 'FASHIONMNIST':
-        clean_data_dir = './FashionMNIST_Data/clean'
-        clean_csv = 'clean.csv'
+        clean_data_dir = './FashionMNIST_Data/test'
+        clean_csv = 'test.csv'
         dataset_suffix = 'FMNIST'
         prepare_data_func = prepare_fashionmnist_data
         num_channels = 1
     elif dataset_type == 'CIFAR10':
-        clean_data_dir = './CIFAR10_Data/clean'
-        clean_csv = 'clean.csv'
+        clean_data_dir = './CIFAR10_Data/test'
+        clean_csv = 'test.csv'
         dataset_suffix = 'CIFAR10'
         prepare_data_func = prepare_cifar10_data
         num_channels = 3

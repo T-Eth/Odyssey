@@ -167,6 +167,60 @@ def split_model_for_mask(model: nn.Module):
 
     raise ValueError(f"Model type {type(model).__name__} not recognized")
 
+def split_model_for_mask_1_back(model: nn.Module):
+    """
+    Returns (Sa, Sb, mask_mode)
+      Sa: ends ONE layer earlier than the usual split (spatial feature map: [B,C,H,W])
+      Sb: the 'rest' (final conv stage + GAP/flatten + classifier)
+      mask_mode: "channel"  -> mask is per-channel and broadcast over H,W
+    Supported:
+      - ResNet-like (conv1,bn1,layer1..layer4, linear/fc)
+      - Custom models with .convnet (nn.Sequential) + .fc
+    """
+    # ----- Case A: ResNet-like -----
+    is_resnet_like = (
+        hasattr(model, 'conv1') and hasattr(model, 'bn1')
+        and hasattr(model, 'layer1') and hasattr(model, 'layer2')
+        and hasattr(model, 'layer3') and hasattr(model, 'layer4')
+        and (hasattr(model, 'linear') or hasattr(model, 'fc'))
+    )
+    if is_resnet_like:
+        clf = getattr(model, 'linear', None) or getattr(model, 'fc')
+        Sa = nn.Sequential(
+            model.conv1,
+            model.bn1,
+            nn.ReLU(inplace=True),
+            model.layer1,
+            model.layer2,
+            model.layer3,           # <-- stop ONE BLOCK earlier than usual
+        )
+        Sb = nn.Sequential(
+            model.layer4,
+            nn.AdaptiveAvgPool2d((1,1)),
+            nn.Flatten(start_dim=1),
+            clf
+        )
+        # Sb now expects spatial input [B,C,H,W]
+        Sb.expects_spatial = True
+        return Sa, Sb, "channel"
+
+    # ----- Case B: convnet + fc -----
+    if hasattr(model, 'convnet') and isinstance(model.convnet, nn.Sequential) and hasattr(model, 'fc'):
+        convmods = list(model.convnet.children())
+        # find the LAST Conv2d in convnet — that (and everything after) goes into Sb
+        last_conv_idx = max(i for i, m in enumerate(convmods) if isinstance(m, nn.Conv2d))
+
+        Sa = nn.Sequential(*convmods[:last_conv_idx])         # one layer back
+        Sb = nn.Sequential(
+            *convmods[last_conv_idx:],                        # final conv + tails
+            nn.Flatten(start_dim=1),
+            model.fc
+        )
+        Sb.expects_spatial = True
+        return Sa, Sb, "channel"
+
+    raise ValueError(f"Model type {type(model).__name__} not recognized for 1-back split")
+
 class Model_Google_1(nn.Module):
     """
     A modified LeNet architecture that seems to be easier to embed backdoors in than the network from the original

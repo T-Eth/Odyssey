@@ -1,9 +1,0 @@
-1. Refactor code to work without importing Odysseus /
-2. Create dataloaders for CIFAR-10 and FashionMnist datasets /
-3. Create model loaders for CIFAR10 and Fashion-MNIST /
-4. Create triggered datasets for CIFAR10, Fashion-MNIST, MNIST for all triggers used in training /
-    3.1. Enumerate trigger patterns and trigger locations used in the models /
-5. Set up Unet and Mask training to work with early stopping
-6. Set up function to calculate FD /
-8. Create metrics to evaluate defence performance (ASR, BA) /
-9. Set up experiments for BTI-DBF testing using reversed ASR and FD
