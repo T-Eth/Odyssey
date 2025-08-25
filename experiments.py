@@ -15,6 +15,7 @@ import pandas as pd
 import uuid
 import matplotlib.pyplot as plt
 from functools import partial
+import time
 
 from datasets import SimpleMNISTDataset, prepare_mnist_data, minmax_normalize, prepare_cifar10_data, get_cifar10_transforms, SimpleCIFAR10Dataset, minmax_normalize_tensor
 from Load_Model import load_mnist_model, get_model_details, load_model, split_model_for_mask, split_model_for_mask_1_back
@@ -22,7 +23,7 @@ from mask import MaskGenerator, MaskGenerator_0_init
 from unet import UNet, loss_bti_dbf_paper
 from trigger_visualisation import visualize_inverse_trigger_grid
 from metrics import calculate_feature_distance
-from evaluate_model_performance import evaluate_model_on_triggered_dataset
+from evaluate_model_performance import evaluate_model, evaluate_model_on_triggered_dataset
 
 def _round_tensor(t, decimals=1):
     if not torch.is_tensor(t): return t
@@ -160,6 +161,7 @@ def BTI_DBF(
         "model_name",
         "feature_distance",
         "unet_delta",
+        "alt_rounds",
     ]
     if os.path.exists(results_file):
         results_df = pd.read_csv(results_file)
@@ -285,7 +287,8 @@ def BTI_DBF(
                                 "total_loss": total_loss,
                                 "model_name": model_file,
                                 "feature_distance": 'NA',
-                                "unet_delta": bool(spec.get("delta", False))
+                                "unet_delta": bool(spec.get("delta", False)),
+                                "alt_rounds": alt_rounds
                             }
                         ]
                     ),
@@ -306,28 +309,20 @@ def BTI_DBF_U(
     unet_factory,
     dataloader,
     variants,
-    # --- unlearning (Eq.3) ---
+    experiment_name,
     unlearn_epochs=3,
     unlearn_lr=1e-3,
     feature_loss_weight=1.0,
     alt_rounds=1,
-    # --- mask training ---
     mask_epochs=20,
-    # --- triggered dataset location ---
-    triggered_dataset_root=None,          # e.g. "./test_results/datasets"
-    dataset_dir_template=None,            # e.g. "/.../Models/{model_file}_{model_type}"
-    # bookkeeping
+    triggered_dataset_root=None, 
     results_file=None,
 ):
     """
     BTI-DBF (U) with BA/ASR evaluation on the model's triggered dataset.
-    One of `dataset_dir_template` or `triggered_dataset_root` should be provided.
-    If both are None, evaluation is skipped.
     """
     # ----- helpers -----
     def _triggered_dir_for(model_file: str, model_type: str) -> str | None:
-        if dataset_dir_template:
-            return dataset_dir_template.format(model_file=model_file, model_type=model_type)
         if triggered_dataset_root:
             if model_type.upper() == "MNIST":
                 return os.path.join(triggered_dataset_root, "Odysseus-MNIST", "Models", f"{model_file}_MNIST")
@@ -340,23 +335,21 @@ def BTI_DBF_U(
         results_file = f"{model_type}_BTI_DBF_U_results.csv"
 
     cols = [
-        "experiment_id","model_type","variant_name",
+        "experiment_id","experiment_name","model_type","variant_name",
         "mask_epochs","unet_epochs","unet_tau","unet_lr","unet_p",
         "unet_lambda_tau","train_method","mask_loss","gen_total_loss",
         "unlearn_epochs","unlearn_lr","feature_w",
         "model_name","split_mode","unet_delta",
-        # new original metrics
         "orig_benign_accuracy","orig_attack_success_rate",
-        # new post-purification metrics
         "benign_accuracy","attack_success_rate","overall_accuracy",
-        "clean_samples","triggered_samples"
+        "clean_samples","triggered_samples",
+        # mask metrics (ADD THESE)
+        "mask_benign_accuracy","mask_attack_success_rate","mask_overall_accuracy","mask_elapsed_seconds",
+        "alt_rounds","elapsed_seconds",
     ]
+
     if os.path.exists(results_file):
         results_df = pd.read_csv(results_file)
-        # backfill missing columns if any
-        for c in cols:
-            if c not in results_df.columns:
-                results_df[c] = np.nan
         results_df = results_df[cols]
     else:
         results_df = pd.DataFrame(columns=cols)
@@ -373,18 +366,20 @@ def BTI_DBF_U(
 
     # ----- pick models -----
     df = pd.read_csv(model_list)
-    passing = df[(df['overall_pass'] == True) & (df['mapping_type'] == 'Many to One')]
+    passing = df[(df['overall_pass'] == True)]
     if model_type == "MNIST":
         triggered = passing.sample(num_models, random_state=42)
     elif model_type == "CIFAR10":
-        triggered = passing[passing['architecture'] == 'Resnet18']\
-                    .sample(num_models, random_state=42)
+        triggered = passing[passing['architecture'] == 'Resnet18'].sample(num_models, random_state=42)
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
     if len(triggered) < num_models:
         raise ValueError("not enough models found")
 
+    '''
+    # prevents mask print from cutting off
     torch.set_printoptions(threshold=torch.inf)
+    '''
 
     # ===== main loop over models =====
     for _, row in tqdm(triggered.iterrows(), total=num_models, desc="BTI-DBF (U): Models"):
@@ -402,6 +397,7 @@ def BTI_DBF_U(
 
         # ===== per-variant runs =====
         for spec in variants:
+            start_time = time.perf_counter()
             split_mode = spec.get("split", "final")
             mask_mode  = spec.get("mask_granularity", "auto")
 
@@ -426,13 +422,28 @@ def BTI_DBF_U(
                     init_value=-10.0,
                     mask_mode=mask_mode,
                 ).to(device)
-                print("[U] round", r, "mask raw init =", _round_tensor(mask_generator.get_raw_mask(), 1))
+                #print("[U] round", r, "mask raw init =", _round_tensor(mask_generator.get_raw_mask(), 1))
                 mask_loss = mask_generator.train_decoupling_mask(
                     Sa, Sb, dataloader, device, transform=transform, epochs=int(mask_epochs)
                 )
                 m = mask_generator.get_raw_mask().detach()
-                print("[U] round", r, "mask raw trained =", _round_tensor(m, 1))
-
+                #print("[U] round", r, "mask raw trained =", _round_tensor(m, 1))
+                elapsed_mask = time.perf_counter() - start_time
+                triggered_dir = _triggered_dir_for(model_file, model_type)
+                if r == (int(alt_rounds) - 1):
+                    metrics_mask = {
+                            'mask_benign_accuracy': np.nan,
+                            'mask_attack_success_rate': np.nan,
+                            'mask_overall_accuracy': np.nan,
+                            'mask_clean_samples': np.nan,
+                            'mask_triggered_samples': np.nan
+                            }
+                    metrics_mask = evaluate_model(
+                                    model_path=model_path,
+                                    dataset_dir=triggered_dir,
+                                    device=device,
+                                    masked_model={'Sa':Sa, 'Sb':Sb, 'm':m}
+                            )
                 # Step 2: generator
                 G = unet_factory().to(device)
                 train_callable = _resolve_train_method(G, spec["train_fn"])
@@ -459,7 +470,7 @@ def BTI_DBF_U(
                     
                 fw.train(True)
                 optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, fw.parameters()), lr=unlearn_lr)
-                ce = torch.nn.CrossEntropyLoss()
+                criterion = torch.nn.CrossEntropyLoss()
 
                 for epoch in range(int(unlearn_epochs)):
                     for xb, yb, *_ in dataloader:
@@ -472,14 +483,16 @@ def BTI_DBF_U(
                         with torch.no_grad():
                             feat_x  = Sa(transform(xb))
                             feat_gx = Sa(transform(Gx_raw))
+                        # mean across batch
                         feat_term = (feat_x - feat_gx).view(xb.size(0), -1).norm(p=2, dim=1).mean()
 
-                        loss_unlearn = ce(logits_x, yb) + ce(logits_gx, yb) + feature_loss_weight * feat_term
+                        loss_unlearn = criterion(logits_x, yb) + criterion(logits_gx, yb) + feature_loss_weight * feat_term
                         optimizer.zero_grad()
                         loss_unlearn.backward()
                         optimizer.step()
                 fw.train(False)
 
+            elapsed = time.perf_counter() - start_time
             # ===== evaluation on triggered dataset (BA & ASR) =====
             metrics = {
                 'benign_accuracy': np.nan,
@@ -488,10 +501,9 @@ def BTI_DBF_U(
                 'clean_samples': np.nan,
                 'triggered_samples': np.nan
             }
-            triggered_dir = _triggered_dir_for(model_file, model_type)
             if triggered_dir and os.path.exists(triggered_dir):
                 try:
-                    metrics = evaluate_model_on_triggered_dataset(
+                    metrics = evaluate_model(
                         model_path=model_path,
                         dataset_dir=triggered_dir,
                         device=device,
@@ -509,6 +521,7 @@ def BTI_DBF_U(
                         [
                             {
                                 "experiment_id": experiment_id,
+                                "experiment_name": experiment_name,
                                 "model_type": model_type,
                                 "variant_name": spec["name"],
                                 "mask_epochs": int(mask_epochs),
@@ -532,8 +545,14 @@ def BTI_DBF_U(
                                 "overall_accuracy": metrics.get("overall_accuracy"),
                                 "clean_samples": metrics.get("clean_samples"),
                                 "triggered_samples": metrics.get("triggered_samples"),
+                                "mask_benign_accuracy": metrics_mask.get("benign_accuracy"),
+                                "mask_attack_success_rate": metrics_mask.get("attack_success_rate"),
+                                "mask_overall_accuracy": metrics_mask.get("overall_accuracy"),
+                                "mask_elapsed_seconds": elapsed_mask,
                                 "orig_benign_accuracy": orig_ba,
                                 "orig_attack_success_rate": orig_asr,
+                                "alt_rounds": alt_rounds,
+                                "elapsed_seconds": elapsed
                             }
                         ]
                     ),

@@ -61,7 +61,7 @@ class MaskGenerator_0_init(nn.Module):
         mask_mode:
           - "vector"   -> [1, D]          (flat features)
           - "channel"  -> [1, C, 1, 1]    (per-channel, broadcast over H,W)
-          - "spatial"  -> [1, C, H, W]    (per-element mask)  <-- NEW
+          - "spatial"  -> [1, C, H, W]    (per-element mask)
           - "auto"     -> picks [1,D] if flat, else [1,C,H,W]
         """
         super().__init__()
@@ -162,7 +162,7 @@ class MaskGenerator_0_init(nn.Module):
 
                 loss = criterion(logits_benign, y) - criterion(logits_poisoned, y)
 
-                # regularizers (soft; keep them small)
+                # regularisers
                 if l1_lambda > 0:
                     loss = loss + l1_lambda * self.get_raw_mask().mean()
                 if tv_lambda > 0 and self.get_raw_mask().dim() == 4:
