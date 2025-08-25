@@ -130,7 +130,6 @@ def evaluate_model(
 
         Sa = Sa.to(device).eval()
         Sb = Sb.to(device).eval()
-        m  = m.detach().to(device)
 
         # Whether Sb expects spatial features (like in your train_decoupling_mask)
         expects_spatial = getattr(Sb, "expects_spatial", False)

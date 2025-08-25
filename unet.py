@@ -470,7 +470,6 @@ class UNet(nn.Module):
         """
         self.train()
         Sa.eval()
-        mask = mask.detach().to(device)
     
         opt = torch.optim.Adam(self.parameters(), lr=lr)
     
@@ -593,38 +592,28 @@ class UNet(nn.Module):
             return Gx_raw, (Gx_raw - x)
 
 
-def loss_bti_dbf_paper(x_norm, Gx_norm, Sa, m, p=2, eps=1e-12):
+def loss_bti_dbf_paper(x_norm, Gx_norm, Sa, mask, p=2, eps=1e-12):
+    """
+    If `mask` is a MaskGenerator_0_init (i.e., has _apply_mask),
+    use its built-ins. Otherwise treat `mask` as a raw tensor (legacy path).
+    """
     with torch.no_grad():
         feat_x = Sa(x_norm)
     feat_gx = Sa(Gx_norm)
+    diff = feat_x - feat_gx  # works for [B,D] or [B,C,H,W]
 
-    if feat_x.dim() == 2:  # [B,D]
-        if m.dim() == 1:
-            m_b = m.unsqueeze(0).expand_as(feat_x)
-        elif m.dim() == 2 and m.size(0) in (1, feat_x.size(0)) and m.size(1) == feat_x.size(1):
-            m_b = m.expand_as(feat_x)
+    # --- New path: mask is an object with inbuilt apply methods ---
+    if hasattr(mask, "_apply_mask") and hasattr(mask, "_apply_complement_mask"):
+        benign_feats   = mask._apply_mask(diff)
+        backdoor_feats = mask._apply_complement_mask(diff)
+
+        if diff.dim() == 2:  # [B, D]
+            benign   = torch.norm(benign_feats + eps, p=p, dim=1)
+            backdoor = torch.norm(backdoor_feats + eps, p=p, dim=1)
+        elif diff.dim() == 4:  # [B, C, H, W]
+            B = diff.size(0)
+            benign   = ((benign_feats.abs().reshape(B, -1).pow(p).sum(dim=1) + eps).pow(1.0 / p))
+            backdoor = ((backdoor_feats.abs().reshape(B, -1).pow(p).sum(dim=1) + eps).pow(1.0 / p))
         else:
-            raise ValueError("For flat features, mask must be [D] or [1,D].")
-        diff = feat_x - feat_gx
-        benign   = torch.norm(diff * m_b + eps, p=p, dim=1)
-        backdoor = torch.norm(diff * (1.0 - m_b) + eps, p=p, dim=1)
+            raise RuntimeError("Unsupported Sa(x) rank.")
         return (benign - backdoor).mean()
-
-    elif feat_x.dim() == 4:  # [B,C,H,W]
-        B, C, H, W = feat_x.shape
-        if m.dim() == 4 and m.shape[1:] in [(C, H, W), (C, 1, 1)]:
-            m_b = m
-        elif m.dim() == 2 and m.size(1) == C:
-            m_b = m.view(1, C, 1, 1)
-        elif m.dim() == 1 and m.numel() == C:
-            m_b = m.view(1, C, 1, 1)
-        else:
-            raise ValueError("For spatial features, mask must be [1,C,H,W], [1,C,1,1], [1,C], or [C].")
-        m_b = m_b.to(feat_x.device).expand(B, -1, H, W)
-
-        diff = feat_x - feat_gx
-        benign   = (((diff * m_b).abs().reshape(B, -1).pow(p).sum(dim=1) + eps).pow(1.0/p))
-        backdoor = (((diff * (1.0 - m_b)).abs().reshape(B, -1).pow(p).sum(dim=1) + eps).pow(1.0/p))
-        return (benign - backdoor).mean()
-    else:
-        raise RuntimeError("Unsupported Sa(x) rank.")

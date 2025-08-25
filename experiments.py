@@ -426,7 +426,7 @@ def BTI_DBF_U(
                 mask_loss = mask_generator.train_decoupling_mask(
                     Sa, Sb, dataloader, device, transform=transform, epochs=int(mask_epochs)
                 )
-                m = mask_generator.get_raw_mask().detach()
+                m = mask_generator
                 #print("[U] round", r, "mask raw trained =", _round_tensor(m, 1))
                 elapsed_mask = time.perf_counter() - start_time
                 triggered_dir = _triggered_dir_for(model_file, model_type)
